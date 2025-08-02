@@ -3,24 +3,80 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const http = require('http');
+const { Server } = require('socket.io');
+const multer = require('multer'); // Add multer
 require('dotenv').config();
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+});
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
+
+// Multer Configuration
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, 'uploads/'); // Directory to store uploaded files
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + '-' + file.originalname); // Unique filename
+  },
+});
+const upload = multer({ storage: storage });
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static('uploads')); // Serve uploaded files statically
 
 // MongoDB Atlas Connection
 const mongoURI = 'mongodb+srv://pankajut7809:C7Sh121M59unx5QI@milkcluster.vsj7iks.mongodb.net/dailydrop?retryWrites=true&w=majority';
 mongoose.connect(mongoURI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 5000,
 })
   .then(() => console.log('Connected to MongoDB Atlas'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
+
+mongoose.connection.on('disconnected', () => console.log('MongoDB disconnected'));
+mongoose.connection.on('error', (err) => console.error('MongoDB connection error:', err));
+
+// Shop Schema
+const shopSchema = new mongoose.Schema({
+  location: {
+    type: {
+      type: String,
+      enum: ['Point'],
+      required: true,
+      default: 'Point',
+    },
+    coordinates: {
+      type: [Number], // [longitude, latitude]
+      required: true,
+    },
+  },
+  updatedAt: { type: Date, default: Date.now },
+});
+shopSchema.index({ location: '2dsphere' }); // Geospatial index
+const Shop = mongoose.model('Shop', shopSchema);
+
+// Product Schema (updated for image paths)
+const productSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  price: { type: Number, required: true },
+  unit: { type: String, required: true },
+  images: [{ type: String, required: true }], // Array of image paths
+  createdAt: { type: Date, default: Date.now },
+});
+const Product = mongoose.model('Product', productSchema);
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -32,19 +88,17 @@ const userSchema = new mongoose.Schema({
   address: { type: String },
   pincode: { type: String },
   building: { type: String },
+  location: {
+    type: {
+      type: String,
+      enum: ['Point'],
+      default: 'Point',
+    },
+    coordinates: [Number], // [longitude, latitude]
+  },
   createdAt: { type: Date, default: Date.now },
 });
 const User = mongoose.model('User', userSchema);
-
-// Product Schema
-const productSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  price: { type: Number, required: true },
-  unit: { type: String, required: true },
-  emoji: { type: String },
-  createdAt: { type: Date, default: Date.now },
-});
-const Product = mongoose.model('Product', productSchema);
 
 // Inventory Schema
 const inventorySchema = new mongoose.Schema({
@@ -59,12 +113,14 @@ const Inventory = mongoose.model('Inventory', inventorySchema);
 // Order Schema
 const orderSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  items: [{
-    productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-    name: String,
-    quantity: Number,
-    price: Number,
-  }],
+  items: [
+    {
+      productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+      name: String,
+      quantity: Number,
+      price: Number,
+    },
+  ],
   total: { type: Number, required: true },
   address: { type: String, required: true },
   status: { type: String, enum: ['pending', 'packed', 'out_for_delivery', 'delivered'], default: 'pending' },
@@ -73,21 +129,41 @@ const orderSchema = new mongoose.Schema({
 });
 const Order = mongoose.model('Order', orderSchema);
 
+// Notification Schema
+const notificationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
+  message: { type: String, required: true },
+  read: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+});
+const Notification = mongoose.model('Notification', notificationSchema);
+
+// Complaint Schema
+const complaintSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null },
+  description: { type: String, required: true },
+  status: { type: String, enum: ['pending', 'resolved'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now },
+});
+const Complaint = mongoose.model('Complaint', complaintSchema);
+
 // Initialize Default Admin
 const initializeAdmin = async () => {
   try {
-    const adminExists = await User.findOne({ email: 'admin@gmail.com', role: 'admin' });
+    const adminExists = await User.findOne({ email: 'admin@example.com', role: 'admin' });
     if (!adminExists) {
       const hashedPassword = await bcrypt.hash('Dimple#@123', 10);
       const admin = new User({
         name: 'Admin',
-        email: 'admin@gmail.com',
+        email: 'admin@example.com',
         phone: '0000000000',
         password: hashedPassword,
         role: 'admin',
       });
       await admin.save();
-      console.log('Default admin created with email: admin@gmail.com');
+      console.log('Default admin created with email: admin@example.com');
     } else {
       console.log('Default admin already exists');
     }
@@ -97,43 +173,85 @@ const initializeAdmin = async () => {
 };
 initializeAdmin();
 
-// Middleware to verify JWT
+// Socket.IO Connection
+io.on('connection', (socket) => {
+  console.log('Client connected:', socket.id);
+
+  socket.on('joinRoom', (userId) => {
+    socket.join(userId);
+    console.log(`User ${userId} joined room`);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
+});
+
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) {
-    console.log('No token provided in request');
     return res.status(401).json({ error: 'Access denied: No token provided' });
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      console.log('Token verification failed:', err.message);
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
     req.user = user;
-    console.log('Token verified, user:', user);
     next();
   });
 };
 
-// Middleware to restrict to admin
 const restrictToAdmin = (req, res, next) => {
   if (req.user.role !== 'admin') {
-    console.log('Access denied: User is not admin, role:', req.user.role);
     return res.status(403).json({ error: 'Access restricted to admins' });
+  }
+  next();
+};
+
+const restrictToRoles = (roles) => (req, res, next) => {
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).json({ error: `Access restricted to ${roles.join(' or ')}` });
   }
   next();
 };
 
 // Signup Endpoint (for customers)
 app.post('/api/auth/register', async (req, res) => {
-  const { name, email, phone, password, address, pincode, building } = req.body;
+  const { name, email, phone, password, address, pincode, building, location } = req.body;
 
-  // Validate pincode (Jaipur pincodes: 302001 to 302039)
   const pincodeNum = parseInt(pincode);
   if (!pincode || pincodeNum < 302001 || pincodeNum > 302039) {
     return res.status(400).json({ error: 'We do not deliver to this pincode yet' });
+  }
+
+  // Get shop location
+  const shop = await Shop.findOne();
+  if (!shop) {
+    return res.status(500).json({ error: 'Shop location not set by admin' });
+  }
+
+  // Validate location (ensure it's an array of [lat, lng])
+  const userLocation = location && Array.isArray(location) && location.length === 2 ? location : null;
+  if (!userLocation) {
+    return res.status(400).json({ error: 'Invalid location format. Provide [latitude, longitude]' });
+  }
+
+  // Calculate distance using Haversine formula (approximate)
+  const R = 6371; // Radius of the Earth in kilometers
+  const [userLat, userLng] = userLocation;
+  const [shopLat, shopLng] = shop.location.coordinates;
+  const dLat = (userLat - shopLat) * Math.PI / 180;
+  const dLng = (userLng - shopLng) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(shopLat * Math.PI / 180) * Math.cos(userLat * Math.PI / 180) *
+            Math.sin(dLng/2) * Math.sin(dLng/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const distance = R * c; // Distance in kilometers
+
+  if (distance > 3) {
+    return res.status(400).json({ error: 'User location must be within 3km of the shop' });
   }
 
   try {
@@ -152,11 +270,15 @@ app.post('/api/auth/register', async (req, res) => {
       address,
       pincode,
       building,
+      location: {
+        type: 'Point',
+        coordinates: userLocation, // [longitude, latitude]
+      },
     });
     await user.save();
 
     const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
-    res.status(201).json({ token, user: { id: user._id, name, email, role: user.role, address, pincode, building } });
+    res.status(201).json({ token, user: { id: user._id, name, email, role: user.role, address, pincode, building, location: userLocation } });
   } catch (err) {
     console.error('Registration error:', err);
     res.status(500).json({ error: 'Registration failed' });
@@ -201,19 +323,16 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const user = await User.findOne({ email, role });
     if (!user) {
-      console.log(`Login failed: No user found with email ${email} and role ${role}`);
       return res.status(400).json({ error: 'Invalid email or role' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      console.log(`Login failed: Invalid password for email ${email}`);
       return res.status(400).json({ error: 'Invalid password' });
     }
 
     const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
-    console.log(`Login successful for user: ${email}`);
-    res.json({ token, user: { id: user._id, name: user.name, email, role: user.role, address: user.address, pincode: user.pincode, building: user.building } });
+    res.json({ token, user: { id: user._id, name: user.name, email, role: user.role, address: user.address, pincode: user.pincode, building: user.building, location: user.location?.coordinates } });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Login failed' });
@@ -225,33 +344,41 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.userId);
     if (!user) {
-      console.log(`Verify failed: User not found for ID ${req.user.userId}`);
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json({ user: { id: user._id, name: user.name, email: user.email, role: user.role, address: user.address, pincode: user.pincode, building: user.building } });
+    res.json({ user: { id: user._id, name: user.name, email: user.email, role: user.role, address: user.address, pincode: user.pincode, building: user.building, location: user.location?.coordinates } });
   } catch (err) {
     console.error('Verification error:', err);
     res.status(500).json({ error: 'Verification failed' });
   }
 });
 
-// Update Profile Endpoint (allows admin to update email and password)
+// ... (previous imports and middleware remain the same)
+
+// Update Profile Endpoint
 app.put('/api/auth/profile', authenticateToken, async (req, res) => {
-  const { name, phone, address, building, pincode, email, password } = req.body;
+  const { name, phone, address, building, pincode, email, password, location } = req.body;
 
   console.log('Profile update request received:', { userId: req.user.userId, payload: req.body });
+
+  // Check if at least one updatable field is provided
+  const updatableFields = { name, phone, address, building, pincode, email, password, location };
+  const hasUpdatableField = Object.values(updatableFields).some(field => 
+    field !== undefined && field !== null && (typeof field !== 'object' || Object.keys(field).length > 0)
+  );
+  if (!hasUpdatableField) {
+    return res.status(400).json({ error: 'No updatable fields provided' });
+  }
 
   try {
     const user = await User.findById(req.user.userId);
     if (!user) {
-      console.log(`User not found for ID: ${req.user.userId}`);
       return res.status(404).json({ error: 'User not found' });
     }
 
     if (email && email !== user.email) {
       const existingUser = await User.findOne({ email });
       if (existingUser) {
-        console.log(`Email already in use: ${email}`);
         return res.status(400).json({ error: 'Email already in use' });
       }
       user.email = email;
@@ -267,23 +394,49 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
     user.building = building || user.building;
     user.pincode = pincode || user.pincode;
 
+    // Handle location update
+    if (location && Array.isArray(location) && location.length === 2) {
+      const shop = await Shop.findOne();
+      if (!shop) {
+        return res.status(500).json({ error: 'Shop location not set by admin' });
+      }
+
+      const R = 6371; // Radius of the Earth in kilometers
+      const [userLat, userLng] = location;
+      const [shopLat, shopLng] = shop.location.coordinates;
+      const dLat = (userLat - shopLat) * Math.PI / 180;
+      const dLng = (userLng - shopLng) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(shopLat * Math.PI / 180) * Math.cos(userLat * Math.PI / 180) *
+                Math.sin(dLng/2) * Math.sin(dLng/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const distance = R * c;
+
+      if (distance > 3) {
+        return res.status(400).json({ error: 'New location must be within 3km of the shop' });
+      }
+
+      user.location = { type: 'Point', coordinates: location };
+    }
+
     await user.save();
     console.log(`Profile updated successfully for user: ${user.email}`);
 
-    res.json({ user: { id: user._id, name: user.name, email: user.email, role: user.role, address: user.address, pincode: user.pincode, building: user.building } });
+    res.json({ user: { id: user._id, name: user.name, email: user.email, role: user.role, address: user.address, pincode: user.pincode, building: user.building, location: user.location?.coordinates } });
   } catch (err) {
     console.error('Profile update error:', err);
     res.status(500).json({ error: 'Profile update failed' });
   }
 });
 
-// Get Users Endpoint (for admin, with role filter and search)
+// ... (rest of the backend code remains the same)
+// Get Users Endpoint
 app.get('/api/users', authenticateToken, restrictToAdmin, async (req, res) => {
   try {
     const { role, search } = req.query;
     let query = {};
     if (role) {
-      query.role = { $in: role.split(',').map(r => r.trim()) };
+      query.role = { $in: role.split(',').map((r) => r.trim()) };
     }
     if (search) {
       query.$or = [
@@ -292,39 +445,39 @@ app.get('/api/users', authenticateToken, restrictToAdmin, async (req, res) => {
       ];
     }
     const users = await User.find(query).sort({ createdAt: -1 });
-    res.json(users.map(user => ({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      address: user.address,
-      pincode: user.pincode,
-      building: user.building,
-      createdAt: user.createdAt,
-    })));
-    console.log(`Fetched users with role filter: ${role || 'all'}, search: ${search || 'none'}`);
+    res.json(
+      users.map((user) => ({
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        address: user.address,
+        pincode: user.pincode,
+        building: user.building,
+        location: user.location?.coordinates,
+        createdAt: user.createdAt,
+      }))
+    );
   } catch (err) {
     console.error('Fetch users error:', err);
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
-// Update User Endpoint (for admin)
+// Update User Endpoint
 app.put('/api/users/:id', authenticateToken, restrictToAdmin, async (req, res) => {
   const { id } = req.params;
-  const { name, email, phone, address, pincode, building, role } = req.body;
+  const { name, email, phone, address, pincode, building, role, location } = req.body;
 
   console.log('User update request received:', { userId: id, payload: req.body });
 
   try {
     const user = await User.findById(id);
     if (!user) {
-      console.log(`User not found for ID: ${id}`);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Validate pincode (Jaipur pincodes: 302001 to 302039)
     if (pincode) {
       const pincodeNum = parseInt(pincode);
       if (pincodeNum < 302001 || pincodeNum > 302039) {
@@ -332,16 +485,13 @@ app.put('/api/users/:id', authenticateToken, restrictToAdmin, async (req, res) =
       }
     }
 
-    // Validate role
     if (role && !['customer', 'admin', 'packer', 'delivery'].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
     }
 
-    // Check email uniqueness
     if (email && email !== user.email) {
       const existingUser = await User.findOne({ email });
       if (existingUser) {
-        console.log(`Email already in use: ${email}`);
         return res.status(400).json({ error: 'Email already in use' });
       }
       user.email = email;
@@ -354,9 +504,32 @@ app.put('/api/users/:id', authenticateToken, restrictToAdmin, async (req, res) =
     user.pincode = pincode || user.pincode;
     user.role = role || user.role;
 
-    await user.save();
-    console.log(`User updated successfully: ${user.email}`);
+    // Handle location update (for admin)
+    if (location && Array.isArray(location) && location.length === 2) {
+      const shop = await Shop.findOne();
+      if (!shop) {
+        return res.status(500).json({ error: 'Shop location not set by admin' });
+      }
 
+      const R = 6371; // Radius of the Earth in kilometers
+      const [userLat, userLng] = location;
+      const [shopLat, shopLng] = shop.location.coordinates;
+      const dLat = (userLat - shopLat) * Math.PI / 180;
+      const dLng = (userLng - shopLng) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(shopLat * Math.PI / 180) * Math.cos(userLat * Math.PI / 180) *
+                Math.sin(dLng/2) * Math.sin(dLng/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const distance = R * c;
+
+      if (distance > 3) {
+        return res.status(400).json({ error: 'New location must be within 3km of the shop' });
+      }
+
+      user.location = { type: 'Point', coordinates: location };
+    }
+
+    await user.save();
     res.json({
       id: user._id,
       name: user.name,
@@ -366,6 +539,7 @@ app.put('/api/users/:id', authenticateToken, restrictToAdmin, async (req, res) =
       address: user.address,
       pincode: user.pincode,
       building: user.building,
+      location: user.location?.coordinates,
     });
   } catch (err) {
     console.error('User update error:', err);
@@ -373,26 +547,22 @@ app.put('/api/users/:id', authenticateToken, restrictToAdmin, async (req, res) =
   }
 });
 
-// Delete User Endpoint (for admin)
+// Delete User Endpoint
 app.delete('/api/users/:id', authenticateToken, restrictToAdmin, async (req, res) => {
   const { id } = req.params;
 
   console.log('User delete request received:', { userId: id });
 
   try {
-    // Prevent admin from deleting themselves
     if (id === req.user.userId) {
-      console.log('Cannot delete self: ', req.user.userId);
       return res.status(400).json({ error: 'Cannot delete your own account' });
     }
 
     const user = await User.findByIdAndDelete(id);
     if (!user) {
-      console.log(`User not found for ID: ${id}`);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    console.log(`User deleted successfully: ${user.email}`);
     res.json({ message: 'User deleted successfully' });
   } catch (err) {
     console.error('User delete error:', err);
@@ -416,11 +586,19 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-app.post('/api/products', authenticateToken, restrictToAdmin, async (req, res) => {
-  const { name, price, unit, emoji } = req.body;
+app.post('/api/products', authenticateToken, restrictToAdmin, upload.array('images', 5), async (req, res) => {
+  const { name, price, unit } = req.body;
+  const images = req.files ? req.files.map((file) => file.path) : [];
+
+  if (!name || !price || !unit) {
+    return res.status(400).json({ error: 'Name, price, and unit are required' });
+  }
+  if (images.length < 2) {
+    return res.status(400).json({ error: 'Please upload at least 2 images' });
+  }
 
   try {
-    const product = new Product({ name, price, unit, emoji });
+    const product = new Product({ name, price, unit, images });
     await product.save();
     res.status(201).json(product);
   } catch (err) {
@@ -429,12 +607,27 @@ app.post('/api/products', authenticateToken, restrictToAdmin, async (req, res) =
   }
 });
 
-app.put('/api/products/:id', authenticateToken, restrictToAdmin, async (req, res) => {
+app.put('/api/products/:id', authenticateToken, restrictToAdmin, upload.array('images', 5), async (req, res) => {
   const { id } = req.params;
-  const { name, price, unit, emoji } = req.body;
+  const { name, price, unit } = req.body;
+  const images = req.files ? req.files.map((file) => file.path) : [];
+
+  if (!name || !price || !unit) {
+    return res.status(400).json({ error: 'Name, price, and unit are required' });
+  }
+  if (images.length < 2 && !req.body.images) {
+    return res.status(400).json({ error: 'Please upload at least 2 images' });
+  }
 
   try {
-    const product = await Product.findByIdAndUpdate(id, { name, price, unit, emoji }, { new: true });
+    const updateData = { name, price, unit };
+    if (images.length > 0) {
+      updateData.images = images;
+    } else if (req.body.images) {
+      updateData.images = req.body.images; // Use existing images if no new files uploaded
+    }
+
+    const product = await Product.findByIdAndUpdate(id, updateData, { new: true });
     if (!product) return res.status(404).json({ error: 'Product not found' });
     res.json(product);
   } catch (err) {
@@ -486,15 +679,14 @@ app.get('/api/inventory', authenticateToken, restrictToAdmin, async (req, res) =
     let inventoryQuery = {};
     if (search) {
       const products = await Product.find({ name: { $regex: search, $options: 'i' } }).select('_id');
-      const productIds = products.map(p => p._id);
+      const productIds = products.map((p) => p._id);
       inventoryQuery = { productId: { $in: productIds } };
     }
     const inventory = await Inventory.find(inventoryQuery)
-      .populate('productId', 'name emoji')
+      .populate('productId', 'name images')
       .populate('addedBy', 'name')
       .sort({ createdAt: -1 });
 
-    // Aggregate total quantity per product
     const aggregatedInventory = await Inventory.aggregate([
       { $match: inventoryQuery },
       {
@@ -512,12 +704,12 @@ app.get('/api/inventory', authenticateToken, restrictToAdmin, async (req, res) =
           as: 'product',
         },
       },
-      { $unwind: '$product' },
+      { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
       {
         $project: {
           productId: '$_id',
-          name: '$product.name',
-          emoji: '$product.emoji',
+          name: { $ifNull: ['$product.name', 'Unknown Product'] },
+          images: { $ifNull: ['$product.images', []] },
           totalQuantity: 1,
           unit: 1,
         },
@@ -552,33 +744,48 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
     const { date, status, search } = req.query;
     let query = {};
 
-    // Filter by date (ignoring time)
+    if (req.user.role === 'customer') {
+      query.userId = new mongoose.Types.ObjectId(req.user.userId);
+    } else if (req.user.role === 'packer') {
+      query.status = { $in: ['pending', 'packed'] };
+    } else if (req.user.role === 'delivery') {
+      query.status = { $in: ['packed', 'out_for_delivery', 'delivered'] };
+    }
+
     if (date) {
       const startDate = new Date(date);
       startDate.setHours(0, 0, 0, 0);
       const endDate = new Date(date);
       endDate.setHours(23, 59, 59, 999);
       query.createdAt = { $gte: startDate, $lte: endDate };
+    } else {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      query.createdAt = { $gte: today, $lte: tomorrow };
     }
 
-    // Filter by status
-    if (status && status !== 'all') {
+    if (status && status !== 'all' && req.user.role === 'admin') {
       query.status = status;
     }
 
-    // Filter by search (customer name or email)
-    if (search) {
+    if (search && req.user.role === 'admin') {
       const users = await User.find({
         $or: [
           { name: { $regex: search, $options: 'i' } },
           { email: { $regex: search, $options: 'i' } },
         ],
       }).select('_id');
-      const userIds = users.map(u => u._id);
+      const userIds = users.map((u) => u._id);
       query.userId = { $in: userIds };
     }
 
-    const orders = await Order.find(query).populate('userId', 'name email').sort({ createdAt: -1 });
+    const orders = await Order.find(query)
+      .populate('userId', 'name email phone address pincode building location')
+      .populate('items.productId', 'name images')
+      .sort({ createdAt: -1 });
+
     res.json(orders);
   } catch (err) {
     console.error('Fetch orders error:', err);
@@ -587,11 +794,10 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
 });
 
 // Create Order Endpoint with Stock Check
-app.post('/api/orders', authenticateToken, async (req, res) => {
+app.post('/api/orders', authenticateToken, restrictToRoles(['customer']), async (req, res) => {
   const { items, total, address } = req.body;
 
   try {
-    // Check stock availability
     for (const item of items) {
       const inventory = await Inventory.aggregate([
         { $match: { productId: new mongoose.Types.ObjectId(item.productId) } },
@@ -604,7 +810,6 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
       }
     }
 
-    // Create order
     const order = new Order({
       userId: req.user.userId,
       items,
@@ -613,7 +818,6 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
     });
     await order.save();
 
-    // Deduct stock
     for (const item of items) {
       const inventoryEntries = await Inventory.find({ productId: item.productId }).sort({ createdAt: 1 });
       let remainingQuantity = item.quantity;
@@ -631,23 +835,40 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
       }
     }
 
-    res.status(201).json(order);
+    const populatedOrder = await Order.findById(order._id)
+      .populate('userId', 'name email phone address pincode building location')
+      .populate('items.productId', 'name images');
+    io.emit('orderCreated', populatedOrder);
+    io.to(order.userId.toString()).emit('notification', {
+      orderId: order._id,
+      message: 'Your order has been placed successfully!',
+    });
+
+    res.status(201).json(populatedOrder);
   } catch (err) {
     console.error('Create order error:', err);
     res.status(500).json({ error: 'Failed to create order' });
   }
 });
 
-// Update Order Status Endpoint with Stock Check
-app.put('/api/orders/:id', authenticateToken, async (req, res) => {
+// Update Order Status Endpoint with Stock Check and Notifications
+app.put('/api/orders/:id', authenticateToken, restrictToRoles(['packer', 'delivery', 'admin']), async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
   try {
-    const order = await Order.findById(id);
+    const order = await Order.findById(id)
+      .populate('userId', 'name email phone address pincode building location')
+      .populate('items.productId', 'name images');
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    // If updating to 'packed', ensure stock is still available
+    if (req.user.role === 'packer' && status !== 'packed') {
+      return res.status(400).json({ error: 'Packers can only update status to packed' });
+    }
+    if (req.user.role === 'delivery' && !['out_for_delivery', 'delivered'].includes(status)) {
+      return res.status(400).json({ error: 'Delivery personnel can only update status to out_for_delivery or delivered' });
+    }
+
     if (status === 'packed') {
       for (const item of order.items) {
         const inventory = await Inventory.aggregate([
@@ -664,6 +885,39 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
 
     order.status = status;
     await order.save();
+
+    let message = '';
+    if (status === 'packed') {
+      message = 'Your order has been packed and is ready for delivery!';
+      const deliveryUsers = await User.find({ role: 'delivery' }).select('_id');
+      deliveryUsers.forEach((user) => {
+        io.to(user._id.toString()).emit('notification', {
+          orderId: order._id,
+          message: `New order ${order._id} is packed and ready for delivery.`,
+        });
+      });
+    } else if (status === 'out_for_delivery') {
+      message = 'Your delivery is on the way!';
+    } else if (status === 'delivered') {
+      message = 'Your order has been delivered. Thank you for shopping with DailyDrop!';
+    }
+
+    if (message) {
+      const notification = new Notification({
+        userId: order.userId._id,
+        orderId: order._id,
+        message,
+      });
+      await notification.save();
+
+      io.to(order.userId.toString()).emit('notification', {
+        orderId: order._id,
+        message,
+      });
+    }
+
+    io.emit('orderUpdated', order);
+
     res.json(order);
   } catch (err) {
     console.error('Update order status error:', err);
@@ -671,7 +925,146 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Start Server
-app.listen(PORT, () => {
+// Get Notifications Endpoint
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.user.userId })
+      .sort({ createdAt: -1 })
+      .limit(10);
+    res.json(notifications);
+  } catch (err) {
+    console.error('Fetch notifications error:', err);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// Submit Complaint Endpoint
+app.post('/api/complaints', authenticateToken, restrictToRoles(['customer']), async (req, res) => {
+  const { orderId, description } = req.body;
+
+  try {
+    if (orderId) {
+      const order = await Order.findById(orderId);
+      if (!order) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      if (order.userId.toString() !== req.user.userId) {
+        return res.status(403).json({ error: 'You can only submit complaints for your own orders' });
+      }
+    }
+
+    if (!description || description.trim().length < 10) {
+      return res.status(400).json({ error: 'Description must be at least 10 characters long' });
+    }
+
+    const complaint = new Complaint({
+      userId: req.user.userId,
+      orderId: orderId || null,
+      description,
+    });
+    await complaint.save();
+
+    res.status(201).json(complaint);
+  } catch (err) {
+    console.error('Submit complaint error:', err);
+    res.status(500).json({ error: 'Failed to submit complaint' });
+  }
+});
+
+// Get Complaints Endpoint
+app.get('/api/complaints', authenticateToken, async (req, res) => {
+  try {
+    const { status, search } = req.query;
+    let query = {};
+
+    if (req.user.role !== 'admin') {
+      query.userId = new mongoose.Types.ObjectId(req.user.userId);
+    }
+
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    if (search && req.user.role === 'admin') {
+      const users = await User.find({
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+        ],
+      }).select('_id');
+      const userIds = users.map((u) => u._id);
+      query.userId = { $in: userIds };
+    }
+
+    const complaints = await Complaint.find(query)
+      .populate('userId', 'name email')
+      .populate('orderId', 'items total status')
+      .sort({ createdAt: -1});
+
+    res.json(complaints);
+  } catch (err) {
+    console.error('Fetch complaints error:', err);
+    res.status(500).json({ error: 'Failed to fetch complaints' });
+  }
+});
+
+// Update Complaint Status Endpoint
+app.put('/api/complaints/:id', authenticateToken, restrictToAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  try {
+    if (!['pending', 'resolved'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const complaint = await Complaint.findByIdAndUpdate(id, { status }, { new: true })
+      .populate('userId', 'name email')
+      .populate('orderId', 'items total status');
+    if (!complaint) {
+      return res.status(404).json({ error: 'Complaint not found' });
+    }
+
+    res.json(complaint);
+  } catch (err) {
+    console.error('Update complaint error:', err);
+    res.status(500).json({ error: 'Failed to update complaint' });
+  }
+});
+
+// Set Shop Location Endpoint
+app.put('/api/settings/shop-location', authenticateToken, restrictToAdmin, async (req, res) => {
+  const { location } = req.body;
+
+  if (!location || !Array.isArray(location) || location.length !== 2) {
+    return res.status(400).json({ error: 'Invalid location format. Provide [latitude, longitude]' });
+  }
+
+  try {
+    let shop = await Shop.findOne();
+    if (shop) {
+      shop.location.coordinates = location;
+    } else {
+      shop = new Shop({ location: { type: 'Point', coordinates: location } });
+    }
+    await shop.save();
+    res.json({ message: 'Shop location updated successfully', location: shop.location.coordinates });
+  } catch (err) {
+    console.error('Shop location update error:', err);
+    res.status(500).json({ error: 'Failed to update shop location' });
+  }
+});
+
+app.use((req, res, next) => {
+  console.log(`Route not found: ${req.method} ${req.url}`);
+  res.status(404).json({ error: 'Route not found' });
+});
+
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
